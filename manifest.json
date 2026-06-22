@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "MangaDotNet Downloader",
+  "version": "1.0",
+  "author": "Ethan Muñoz",
+  "description": "Descarga capítulos de manga en PDF, ZIP o CBZ.",
+  "permissions": [
+    "activeTab",
+    "downloads"
+  ],
+  "host_permissions": [
+    "*://*.mangadot.net/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.mangadot.net/chapter/*"],
+      "js": [
+        "lib/jszip.min.js", 
+        "lib/jspdf.umd.min.js", 
+        "content.js"
+      ],
+      "css": ["style.css"]
+    }
+  ]
+}
