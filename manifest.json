@@ -9,11 +9,18 @@
     "downloads"
   ],
   "host_permissions": [
-    "*://*.mangadot.net/*"
+    "*://*.mangadot.net/*",
+    "*://*.hentaifox.com/*",
+    "*://*.nhentai.xxx/*",
+    "*://*.nhentaimg.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["*://*.mangadot.net/chapter/*"],
+      "matches": [
+        "*://*.mangadot.net/chapter/*",
+        "*://*.hentaifox.com/*",
+        "*://*.nhentai.xxx/*"
+      ],
       "js": [
         "lib/jszip.min.js", 
         "lib/jspdf.umd.min.js", 

@@ -27,8 +27,103 @@ function createButton(text, onClick) {
     return btn;
 }
 
+// Detectar el sitio actual
+function getCurrentSite() {
+    const host = window.location.hostname;
+    if (host.includes('hentaifox.com')) return 'hentaifox';
+    if (host.includes('nhentai.')) return 'nhentai';
+    return 'mangadot';
+}
+
+const SITE = getCurrentSite();
+
+// Saber si la pagina actual es un lector (evita inyectar UI en busquedas, galerias, etc.)
+function isReaderPage() {
+    if (SITE === 'mangadot') {
+        return document.querySelector('img.reader-image, div[data-page]') !== null;
+    }
+    // hentaifox y nhentai usan los mismos inputs ocultos en su lector
+    return document.querySelector('#pages') && document.querySelector('#image_dir') && document.querySelector('#gallery_id');
+}
+
 // Extraer URLs
 function getImages() {
+    if (SITE === 'hentaifox' || SITE === 'nhentai') return getGalleryImages();
+    return getMangadotImages();
+}
+
+// hentaifox / nhentai: ambas construyen la URL a partir de inputs ocultos del lector
+function getGalleryImages() {
+    const pagesInput = document.querySelector('#pages');
+    const dirInput = document.querySelector('#image_dir');
+    const galleryInput = document.querySelector('#gallery_id');
+    if (!pagesInput || !dirInput || !galleryInput) return [];
+
+    const totalPages = parseInt(pagesInput.value, 10);
+    if (!totalPages) return [];
+
+    let base;
+    if (SITE === 'hentaifox') {
+        base = `https://i.hentaifox.com/${dirInput.value}/${galleryInput.value}/`;
+    } else {
+        const serverId = (document.querySelector('#server_id') || {}).value || '5';
+        base = `https://i${serverId}.nhentaimg.com/${dirInput.value}/${galleryInput.value}/`;
+    }
+
+    // La extension varia por pagina (webp/jpg), se lee del objeto g_th del sitio
+    const extensions = getExtensionMap();
+    const defaultExt = SITE === 'nhentai' ? 'webp' : 'jpg';
+
+    const urls = [];
+    for (let i = 1; i <= totalPages; i++) {
+        const ext = extensions[i] || defaultExt;
+        urls.push(`${base}${i}.${ext}`);
+    }
+    return urls;
+}
+
+// Lee el JSON g_th que ambos sitios definen en un script inline.
+// Formato: {"1":"j,1280,1837"} o {"fl":{...},"th":{...}} (nhentai)
+// j = jpg, w = webp, p = png
+function getExtensionMap() {
+    const extMap = {};
+    for (const script of document.querySelectorAll('script')) {
+        const text = script.textContent || '';
+        if (!text.includes('g_th')) continue;
+
+        const match = text.match(/parseJSON\('(.+?)'\)/);
+        if (!match) return fallbackExtensionMap();
+
+        try {
+            let data = JSON.parse(match[1]);
+            if (data.fl && typeof data.fl === 'object') data = data.fl;
+
+            for (const [page, info] of Object.entries(data)) {
+                if (!/^\d+$/.test(page)) continue;
+                const fmt = info.charAt(0);
+                extMap[parseInt(page, 10)] = fmt === 'w' ? 'webp' : fmt === 'p' ? 'png' : 'jpg';
+            }
+        } catch (e) {
+            return fallbackExtensionMap();
+        }
+        return extMap;
+    }
+    return fallbackExtensionMap();
+}
+
+// Si g_th no existe, deduce la extension desde la imagen visible del lector
+function fallbackExtensionMap() {
+    const extMap = {};
+    const img = document.querySelector('#gimg, #fimg');
+    if (img) {
+        const match = (img.getAttribute('src') || '').match(/\/(\d+)\.([a-zA-Z0-9]+)$/);
+        if (match) extMap[parseInt(match[1], 10)] = match[2];
+    }
+    return extMap;
+}
+
+// mangadot.net
+function getMangadotImages() {
     const pages = document.querySelectorAll('div[data-page]');
     const totalPages = pages.length;
 
@@ -66,6 +161,7 @@ async function fetchImageBuffer(url) {
 }
 
 // Convertir Buffer a JPEG para PDF
+// Devuelve tambien las dimensiones para que cada pagina del PDF respete el aspecto de su imagen
 function bufferToJpegDataUrl(buffer, mimeType = 'image/webp') {
     return new Promise((resolve, reject) => {
         // Reconstruimos el Blob
@@ -79,7 +175,11 @@ function bufferToJpegDataUrl(buffer, mimeType = 'image/webp') {
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0);
             URL.revokeObjectURL(url);
-            resolve(canvas.toDataURL('image/jpeg', 0.95)); 
+            resolve({
+                dataUrl: canvas.toDataURL('image/jpeg', 0.95),
+                width: img.width,
+                height: img.height
+            });
         };
         img.onerror = () => {
             URL.revokeObjectURL(url);
@@ -102,7 +202,11 @@ function arrayBufferToBase64(buffer) {
 
 function getCleanFileName() {
     let title = document.title || 'Capitulo';
-    title = title.split('|')[0].trim(); 
+    title = title.split('|')[0].trim();
+    // nhentai: "Titulo - Page 1 » nhentai"
+    title = title.replace(/\s*-\s*Page\s*\d+.*$/i, '');
+    // hentaifox: "Titulo Page 1"
+    title = title.replace(/\s+Page\s*\d+.*$/i, '');
     return title.replace(/[^a-z0-9]/gi, '_').toLowerCase(); 
 }
 
@@ -144,18 +248,26 @@ async function processDownload(format) {
             
             if (!PDFClass) throw new Error("No se pudo encontrar la librería jsPDF");
             
-            const pdf = new PDFClass();
+            // Cada pagina del PDF toma el tamaño exacto de su imagen (en px),
+            // asi una portada 16:9 no se estira para caber en un A4 vertical.
+            let pdf = null;
             
             for (let i = 0; i < urls.length; i++) {
                 const buffer = await fetchImageBuffer(urls[i]);
-                if (buffer) {
-                    const jpegDataUrl = await bufferToJpegDataUrl(buffer);
-                    if (i > 0) pdf.addPage();
-                    const pdfWidth = pdf.internal.pageSize.getWidth();
-                    const pdfHeight = pdf.internal.pageSize.getHeight();
-                    pdf.addImage(jpegDataUrl, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+                if (!buffer) continue;
+                
+                const { dataUrl, width, height } = await bufferToJpegDataUrl(buffer);
+                const orientation = width > height ? 'landscape' : 'portrait';
+                
+                if (!pdf) {
+                    pdf = new PDFClass({ unit: 'px', format: [width, height], orientation });
+                } else {
+                    pdf.addPage([width, height], orientation);
                 }
+                pdf.addImage(dataUrl, 'JPEG', 0, 0, width, height);
             }
+            
+            if (!pdf) throw new Error("No se pudo descargar ninguna imagen para el PDF");
             pdf.save(`${fileName}.pdf`);
         }
     } catch (err) {
@@ -179,4 +291,6 @@ function triggerDownload(blob, filename) {
     URL.revokeObjectURL(url);
 }
 
-setTimeout(injectUI, 1000);
+if (isReaderPage()) {
+    setTimeout(injectUI, 1000);
+}
